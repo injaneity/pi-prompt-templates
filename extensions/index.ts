@@ -350,13 +350,18 @@ async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | 
 					const padding = " ".repeat(Math.max(0, innerWidth - visibleWidth(clipped)));
 					return panelLine(theme, `${theme.fg("border", "│")}  ${clipped}${padding}  ${theme.fg("border", "│")}`, safeWidth);
 				};
-				const titlePath = initial
-					? displayPath(writablePath(initial))
-					: draftName
-						? displayPath(join(globalPromptDir(), `${draftName}.md`))
-						: "new prompt";
-				const visibleTitlePath = truncateToWidth(titlePath, Math.max(8, safeWidth - 24), "…");
-				const title = `${theme.fg("border", theme.bold("Prompt Template:"))} ${theme.fg("muted", visibleTitlePath)}`;
+				let title: string;
+				if (!initial && draftStage === "title") {
+					const renderedTitleInput = titleInput.render(Math.max(4, safeWidth - 23))[0] ?? "> ";
+					const inlineInput = renderedTitleInput.startsWith("> ") ? renderedTitleInput.slice(2) : renderedTitleInput;
+					title = `${theme.fg("border", theme.bold("Prompt Template:"))} ${inlineInput}`;
+				} else {
+					const titlePath = initial
+						? displayPath(writablePath(initial))
+						: displayPath(join(globalPromptDir(), `${draftName}.md`));
+					const visibleTitlePath = truncateToWidth(titlePath, Math.max(8, safeWidth - 24), "…");
+					title = `${theme.fg("border", theme.bold("Prompt Template:"))} ${theme.fg("muted", visibleTitlePath)}`;
+				}
 
 				const modeMessage: Record<SubmitMode, string> = {
 					temporary: "modify prompt for this turn only",
@@ -368,9 +373,7 @@ async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | 
 				lines.push(row());
 
 				if (!initial && draftStage === "title") {
-					lines.push(row(theme.fg("mdHeading", theme.bold("prompt title"))));
-					for (const line of titleInput.render(Math.max(10, safeWidth - 6))) lines.push(row(line));
-					for (let i = 0; i < 3; i++) lines.push(row());
+					for (let i = 0; i < 4; i++) lines.push(row());
 				} else {
 					const renderedEditor = editor.render(Math.max(10, safeWidth - 6));
 					const contentLines = renderedEditor.length > 2 ? renderedEditor.slice(1, -1) : renderedEditor;

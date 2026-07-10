@@ -66,8 +66,8 @@ Type `$`, move to **create prompt template**, and press Tab.
 
 This opens a two-step draft with **create new prompt** as its only action:
 
-1. Enter the template title and press Enter.
-2. Enter the template content, using Shift+Enter for newlines.
+1. Type the title directly beside `Prompt Template:` in the popup header, then press Enter.
+2. The popup moves focus to the template content; use Shift+Enter for newlines.
 3. Press Enter again to create the Markdown file and insert its new `$template-name` reference back into your original chat prompt.
 
 There are no temporary or update modes for a template that does not exist yet.
