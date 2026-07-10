@@ -229,9 +229,9 @@ async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | 
 		editor.disableSubmit = true;
 		let focused = true;
 		let saving = false;
-		const submitModes = ["temporary", "save", "create"] as const;
-		type SubmitMode = typeof submitModes[number];
-		let submitMode: SubmitMode = "temporary";
+		type SubmitMode = "temporary" | "save" | "create";
+		const submitModes: readonly SubmitMode[] = initial ? ["temporary", "save", "create"] : ["create"];
+		let submitMode: SubmitMode = initial ? "temporary" : "create";
 
 		const content = () => editor.getExpandedText().trim();
 		const apply = () => done({ action: "apply", content: content() });
@@ -316,7 +316,9 @@ async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | 
 				const contentLines = renderedEditor.length > 2 ? renderedEditor.slice(1, -1) : renderedEditor;
 				for (const line of contentLines) lines.push(row(line));
 				for (let i = contentLines.length; i < 4; i++) lines.push(row());
-				const modeLine = `${theme.fg("mdHeading", theme.bold(modeMessage[submitMode]))} ${theme.fg("dim", "(shift+tab)")}`;
+				const modeLine = initial
+					? `${theme.fg("mdHeading", theme.bold(modeMessage[submitMode]))} ${theme.fg("dim", "(shift+tab)")}`
+					: theme.fg("mdHeading", theme.bold(modeMessage.create));
 				const innerWidth = Math.max(0, safeWidth - 6);
 				const commandText = "esc: cancel • shift+enter: newline • enter: continue";
 				const commandWidth = Math.max(0, innerWidth - visibleWidth(modeLine) - 2);

@@ -64,7 +64,7 @@ Popup controls:
 
 Type `$`, move to **create prompt template**, and press Tab.
 
-This opens the same editor as an existing template, but starts as an unsaved draft. Use Shift+Tab to select **create new prompt**, then press Enter. Pi asks for a name and short description and saves the Markdown file for you.
+This opens a blank unsaved draft with **create new prompt** as its only action—there are no temporary or update modes for a template that does not exist yet. Write the prompt and press Enter. Pi asks for a name and short description and saves the Markdown file for you.
 
 ## Deleting a template
 
