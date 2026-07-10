@@ -33,6 +33,7 @@ import {
 
 const CREATE_TEMPLATE_SENTINEL = "__pi_create_prompt_template__";
 const DELETE_TEMPLATE_SENTINEL = "__pi_delete_prompt_template__";
+const DELETE_SELECTION_PREFIX = "__pi_delete_prompt_template_selection__:";
 
 function agentDir(): string {
 	return process.env.PI_AGENT_DIR || join(homedir(), ".pi", "agent");
@@ -311,16 +312,11 @@ async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | 
 	}, { overlay: true, overlayOptions: { width: "76%", maxHeight: "78%", minWidth: 76, margin: 1 } });
 }
 
-async function deletePromptTemplate(ctx: ExtensionContext, template: PromptBlock): Promise<boolean> {
+function deletePromptTemplate(ctx: ExtensionContext, template: PromptBlock): boolean {
 	if (template.scope === "bundled") {
 		ctx.ui.notify("Bundled prompt templates cannot be deleted.", "warning");
 		return false;
 	}
-	const confirmed = await ctx.ui.confirm(
-		"Delete prompt template?",
-		`${template.name}\n${displayPath(template.path)}\n\nThis cannot be undone.`,
-	);
-	if (!confirmed) return false;
 	try {
 		unlinkSync(template.path);
 		ctx.ui.notify(`Deleted prompt template: ${template.name}`, "info");
@@ -365,9 +361,8 @@ async function selectBlock(ctx: ExtensionContext, title: string): Promise<Prompt
 					const template = selectedItem && blocks.find((block) => block.name === selectedItem.value);
 					if (template) {
 						deleting = true;
-						void deletePromptTemplate(ctx, template).then((deleted) => {
-							if (deleted) done(null);
-						}).finally(() => { deleting = false; tui.requestRender(); });
+						if (deletePromptTemplate(ctx, template)) done(null);
+						deleting = false;
 					}
 					return;
 				}
@@ -381,6 +376,7 @@ async function selectBlock(ctx: ExtensionContext, title: string): Promise<Prompt
 
 export default function promptTemplates(pi: ExtensionAPI): void {
 	const appliedDrafts = new Map<string, string>();
+	let deletePickerActive = false;
 	const rememberResult = (template: PromptBlock, result: PromptEditorResult | null) => {
 		if (result) appliedDrafts.set(template.name, result.content);
 	};
@@ -435,13 +431,23 @@ export default function promptTemplates(pi: ExtensionAPI): void {
 				const match = before.match(/(?:^|[\s(])\$([a-z0-9_-]*)$/i);
 				if (!match) return current.getSuggestions(lines, line, col, options);
 				const query = (match[1] ?? "").toLowerCase();
-				const items = loadBlocks(ctx)
-					.filter((block) => block.name.includes(query))
-					.map((block) => ({
-						value: `$${block.name}`,
-						label: `$${block.name}`,
-						description: ctx.ui.theme.fg("muted", promptPreview(block.content)),
-					}));
+				const templates = loadBlocks(ctx).filter((template) => template.name.includes(query));
+				if (deletePickerActive) {
+					const items = templates
+						.filter((template) => template.scope !== "bundled")
+						.map((template) => ({
+							value: `${DELETE_SELECTION_PREFIX}${template.name}`,
+							label: `$${template.name}`,
+							description: ctx.ui.theme.fg("muted", promptPreview(template.content)),
+						}));
+					if (items.length === 0) deletePickerActive = false;
+					return items.length ? { prefix: `$${query}`, items } : null;
+				}
+				const items = templates.map((template) => ({
+					value: `$${template.name}`,
+					label: `$${template.name}`,
+					description: ctx.ui.theme.fg("muted", promptPreview(template.content)),
+				}));
 				items.push({
 					value: CREATE_TEMPLATE_SENTINEL,
 					label: "Create new prompt template",
@@ -462,6 +468,11 @@ export default function promptTemplates(pi: ExtensionAPI): void {
 		class BlockAwareEditor extends CustomEditor {
 			private opening = false;
 			handleInput(data: string): void {
+				if (deletePickerActive && this.isShowingAutocomplete() && matchesKey(data, Key.escape)) {
+					deletePickerActive = false;
+					super.handleInput(data);
+					return;
+				}
 				if (!this.opening && !this.isShowingAutocomplete() && (matchesKey(data, Key.backspace) || matchesKey(data, Key.delete))) {
 					const { line, col } = this.getCursor();
 					const templates = loadBlocks(ctx);
@@ -515,17 +526,28 @@ export default function promptTemplates(pi: ExtensionAPI): void {
 						});
 					return;
 				}
-				if (currentLine.slice(0, col).endsWith(DELETE_TEMPLATE_SENTINEL)) {
+				const beforeCursor = currentLine.slice(0, col);
+				const deleteSelectionIndex = beforeCursor.lastIndexOf(DELETE_SELECTION_PREFIX);
+				if (deleteSelectionIndex !== -1) {
+					const marker = beforeCursor.slice(deleteSelectionIndex);
+					const name = marker.slice(DELETE_SELECTION_PREFIX.length);
+					for (let i = 0; i < marker.length; i++) super.handleInput("\x7f");
+					const template = loadBlocks(ctx).find((item) => item.name === name && item.scope !== "bundled");
+					if (template && deletePromptTemplate(ctx, template)) appliedDrafts.delete(template.name);
+					deletePickerActive = false;
+					this.tui.requestRender();
+					return;
+				}
+				if (beforeCursor.endsWith(DELETE_TEMPLATE_SENTINEL)) {
 					for (let i = 0; i < DELETE_TEMPLATE_SENTINEL.length; i++) super.handleInput("\x7f");
-					this.opening = true;
-					void selectBlock(ctx, "Delete prompt template")
-						.then(async (template) => {
-							if (template && await deletePromptTemplate(ctx, template)) appliedDrafts.delete(template.name);
-						})
-						.finally(() => {
-							this.opening = false;
-							this.tui.requestRender();
-						});
+					const deletable = loadBlocks(ctx).some((template) => template.scope !== "bundled");
+					if (!deletable) {
+						ctx.ui.notify("No deletable prompt templates found.", "warning");
+						return;
+					}
+					deletePickerActive = true;
+					super.handleInput("$");
+					this.tui.requestRender();
 				}
 			}
 

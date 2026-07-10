@@ -73,7 +73,7 @@ You can delete templates in either of these ways:
 - type `$` and choose **Delete prompt template**
 - run `/prompt-templates`, highlight a template, and press Delete
 
-Pi shows a confirmation modal with the template name and file path before removing anything. Bundled example templates cannot be deleted.
+The delete action reuses the same `$` completion window, so the picker looks and behaves exactly like normal template selection. Choosing a template deletes it immediately. Bundled example templates are excluded from the delete picker.
 
 ## Where templates are stored
 
