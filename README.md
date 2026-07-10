@@ -34,7 +34,7 @@ Type `$` in Pi:
 You are a coding agent. Use $coding-guide to investigate this repository.
 ```
 
-The completion menu shows saved templates and a **Create new prompt template** option.
+The completion menu shows saved templates plus **Create new prompt template** and **Delete prompt template** actions.
 
 1. Use the arrow keys to choose a template.
 2. Press Tab to insert it.
@@ -65,6 +65,15 @@ Popup controls:
 Type `$`, move to **Create new prompt template**, and press Tab.
 
 This opens the same editor as an existing template, but starts as an unsaved draft. Use Shift+Tab to select **create new prompt**, then press Enter. Pi asks for a name and short description and saves the Markdown file for you.
+
+## Deleting a template
+
+You can delete templates in either of these ways:
+
+- type `$` and choose **Delete prompt template**
+- run `/prompt-templates`, highlight a template, and press Delete
+
+Pi shows a confirmation modal with the template name and file path before removing anything. Bundled example templates cannot be deleted.
 
 ## Where templates are stored
 

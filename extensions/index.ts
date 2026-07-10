@@ -18,7 +18,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -32,6 +32,7 @@ import {
 } from "../src/core.js";
 
 const CREATE_TEMPLATE_SENTINEL = "__pi_create_prompt_template__";
+const DELETE_TEMPLATE_SENTINEL = "__pi_delete_prompt_template__";
 
 function agentDir(): string {
 	return process.env.PI_AGENT_DIR || join(homedir(), ".pi", "agent");
@@ -310,6 +311,26 @@ async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | 
 	}, { overlay: true, overlayOptions: { width: "76%", maxHeight: "78%", minWidth: 76, margin: 1 } });
 }
 
+async function deletePromptTemplate(ctx: ExtensionContext, template: PromptBlock): Promise<boolean> {
+	if (template.scope === "bundled") {
+		ctx.ui.notify("Bundled prompt templates cannot be deleted.", "warning");
+		return false;
+	}
+	const confirmed = await ctx.ui.confirm(
+		"Delete prompt template?",
+		`${template.name}\n${displayPath(template.path)}\n\nThis cannot be undone.`,
+	);
+	if (!confirmed) return false;
+	try {
+		unlinkSync(template.path);
+		ctx.ui.notify(`Deleted prompt template: ${template.name}`, "info");
+		return true;
+	} catch (error) {
+		ctx.ui.notify(`Could not delete ${template.name}: ${error instanceof Error ? error.message : String(error)}`, "error");
+		return false;
+	}
+}
+
 async function selectBlock(ctx: ExtensionContext, title: string): Promise<PromptBlock | null> {
 	const blocks = loadBlocks(ctx);
 	if (blocks.length === 0 || ctx.mode !== "tui") return null;
@@ -329,15 +350,30 @@ async function selectBlock(ctx: ExtensionContext, title: string): Promise<Prompt
 			scrollInfo: (text) => theme.fg("dim", text),
 			noMatch: (text) => theme.fg("warning", text),
 		});
+		let deleting = false;
 		list.onSelect = (item) => done(item.value);
 		list.onCancel = () => done(null);
 		container.addChild(list);
-		container.addChild(new Text(theme.fg("dim", "↑↓ navigate • Enter open • Esc cancel"), 1, 0));
+		container.addChild(new Text(theme.fg("dim", "↑↓ navigate • Enter open • Delete remove • Esc cancel"), 1, 0));
 		container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
 		return {
 			render: (width) => container.render(width),
 			invalidate: () => container.invalidate(),
-			handleInput: (data) => { list.handleInput(data); tui.requestRender(); },
+			handleInput: (data) => {
+				if (!deleting && matchesKey(data, Key.delete)) {
+					const selectedItem = list.getSelectedItem();
+					const template = selectedItem && blocks.find((block) => block.name === selectedItem.value);
+					if (template) {
+						deleting = true;
+						void deletePromptTemplate(ctx, template).then((deleted) => {
+							if (deleted) done(null);
+						}).finally(() => { deleting = false; tui.requestRender(); });
+					}
+					return;
+				}
+				if (!deleting) list.handleInput(data);
+				tui.requestRender();
+			},
 		};
 	}, { overlay: true, overlayOptions: { width: "70%", maxHeight: "80%", minWidth: 56 } });
 	return blocks.find((block) => block.name === selected) ?? null;
@@ -411,6 +447,11 @@ export default function promptTemplates(pi: ExtensionAPI): void {
 					label: "Create new prompt template",
 					description: ctx.ui.theme.fg("muted", `Save in ${displayPath(globalPromptDir())}`),
 				});
+				items.push({
+					value: DELETE_TEMPLATE_SENTINEL,
+					label: "Delete prompt template",
+					description: ctx.ui.theme.fg("muted", "Choose a saved template to remove"),
+				});
 				return { prefix: `$${query}`, items };
 			},
 			applyCompletion: (lines, line, col, item, prefix) => current.applyCompletion(lines, line, col, item, prefix),
@@ -472,6 +513,19 @@ export default function promptTemplates(pi: ExtensionAPI): void {
 							this.opening = false;
 							this.tui.requestRender();
 						});
+					return;
+				}
+				if (currentLine.slice(0, col).endsWith(DELETE_TEMPLATE_SENTINEL)) {
+					for (let i = 0; i < DELETE_TEMPLATE_SENTINEL.length; i++) super.handleInput("\x7f");
+					this.opening = true;
+					void selectBlock(ctx, "Delete prompt template")
+						.then(async (template) => {
+							if (template && await deletePromptTemplate(ctx, template)) appliedDrafts.delete(template.name);
+						})
+						.finally(() => {
+							this.opening = false;
+							this.tui.requestRender();
+						});
 				}
 			}
 
@@ -486,9 +540,11 @@ export default function promptTemplates(pi: ExtensionAPI): void {
 				...theme,
 				selectList: {
 					...theme.selectList,
-					selectedText: (text) => text.includes("Create new prompt template")
-						? ctx.ui.theme.fg("mdHeading", text)
-						: theme.selectList.selectedText(text),
+					selectedText: (text) => {
+						if (text.includes("Create new prompt template")) return ctx.ui.theme.fg("mdHeading", text);
+						if (text.includes("Delete prompt template")) return ctx.ui.theme.fg("error", text);
+						return theme.selectList.selectedText(text);
+					},
 				},
 			};
 			return new BlockAwareEditor(tui, promptTemplateTheme, keybindings);
