@@ -1,0 +1,38 @@
+{
+  "name": "pi-prompt-templates",
+  "version": "0.1.0",
+  "description": "Composable, editable prompt templates for pi",
+  "type": "module",
+  "scripts": {
+    "check": "tsc",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "keywords": [
+    "pi-package",
+    "prompt-templates"
+  ],
+  "author": "Zane Chee",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/injaneity/pi-prompt-templates.git"
+  },
+  "homepage": "https://github.com/injaneity/pi-prompt-templates#readme",
+  "bugs": {
+    "url": "https://github.com/injaneity/pi-prompt-templates/issues"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.20.6",
+    "typescript": "^7.0.2"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.6",
+    "@earendil-works/pi-tui": "^0.80.6"
+  }
+}
