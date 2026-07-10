@@ -10,6 +10,7 @@ import {
 	Container,
 	Editor,
 	type EditorTheme,
+	Input,
 	Key,
 	matchesKey,
 	SelectList,
@@ -227,6 +228,9 @@ async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | 
 		const editor = new Editor(tui, editorTheme);
 		editor.setText(initial?.content ?? "");
 		editor.disableSubmit = true;
+		const titleInput = new Input();
+		let draftStage: "title" | "content" = initial ? "content" : "title";
+		let draftName = "";
 		let focused = true;
 		let saving = false;
 		type SubmitMode = "temporary" | "save" | "create";
@@ -235,6 +239,42 @@ async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | 
 
 		const content = () => editor.getExpandedText().trim();
 		const apply = () => done({ action: "apply", content: content() });
+		const acceptTitle = () => {
+			const name = slugifyName(titleInput.getValue());
+			if (!isValidBlockName(name)) {
+				ctx.ui.notify("Names must start with a letter and use lowercase letters, numbers, - or _.", "warning");
+				return;
+			}
+			if (loadBlocks(ctx).some((template) => template.name === name)) {
+				ctx.ui.notify(`Prompt template already exists: ${name}`, "warning");
+				return;
+			}
+			draftName = name;
+			draftStage = "content";
+			titleInput.focused = false;
+			editor.focused = focused;
+			tui.requestRender();
+		};
+		const createDraft = () => {
+			const body = content();
+			if (!body) {
+				ctx.ui.notify("Cannot save an empty prompt template.", "warning");
+				return;
+			}
+			try {
+				const draft: PromptBlock = {
+					name: draftName,
+					description: promptPreview(body, 100) || `Reusable prompt template: ${draftName}`,
+					content: body,
+					path: join(globalPromptDir(), `${draftName}.md`),
+					scope: "global",
+				};
+				const saved = saveBlock(draft, draft.description, body);
+				done({ action: "saved", content: saved.content, template: saved, savedAsNew: true });
+			} catch (error) {
+				ctx.ui.notify(`Could not save ${draftName}: ${error instanceof Error ? error.message : String(error)}`, "error");
+			}
+		};
 		const saveExisting = () => {
 			if (!initial) {
 				ctx.ui.notify("This prompt is unsaved. Use Shift+Tab to select Create new.", "warning");
@@ -266,10 +306,20 @@ async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | 
 
 		return {
 			get focused() { return focused; },
-			set focused(value: boolean) { focused = value; editor.focused = value; },
+			set focused(value: boolean) {
+				focused = value;
+				titleInput.focused = value && draftStage === "title";
+				editor.focused = value && draftStage === "content";
+			},
 			handleInput(data: string) {
 				if (saving) return;
 				if (matchesKey(data, Key.escape)) return done(null);
+				if (!initial && draftStage === "title") {
+					if (matchesKey(data, Key.enter)) acceptTitle();
+					else titleInput.handleInput(data);
+					tui.requestRender();
+					return;
+				}
 				if (matchesKey(data, Key.shift("tab"))) {
 					const current = submitModes.indexOf(submitMode);
 					submitMode = submitModes[(current + 1) % submitModes.length] ?? "temporary";
@@ -282,6 +332,7 @@ async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | 
 					return;
 				}
 				if (matchesKey(data, Key.enter)) {
+					if (!initial) return createDraft();
 					if (submitMode === "save") return saveExisting();
 					if (submitMode === "create") return saveAsNew();
 					return apply();
@@ -299,7 +350,11 @@ async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | 
 					const padding = " ".repeat(Math.max(0, innerWidth - visibleWidth(clipped)));
 					return panelLine(theme, `${theme.fg("border", "│")}  ${clipped}${padding}  ${theme.fg("border", "│")}`, safeWidth);
 				};
-				const titlePath = initial ? displayPath(writablePath(initial)) : "Unsaved";
+				const titlePath = initial
+					? displayPath(writablePath(initial))
+					: draftName
+						? displayPath(join(globalPromptDir(), `${draftName}.md`))
+						: "new prompt";
 				const visibleTitlePath = truncateToWidth(titlePath, Math.max(8, safeWidth - 24), "…");
 				const title = `${theme.fg("border", theme.bold("Prompt Template:"))} ${theme.fg("muted", visibleTitlePath)}`;
 
@@ -312,15 +367,23 @@ async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | 
 				lines.push(panelLine(theme, framedBorder(theme, safeWidth, "╭", "╮", title), safeWidth));
 				lines.push(row());
 
-				const renderedEditor = editor.render(Math.max(10, safeWidth - 6));
-				const contentLines = renderedEditor.length > 2 ? renderedEditor.slice(1, -1) : renderedEditor;
-				for (const line of contentLines) lines.push(row(line));
-				for (let i = contentLines.length; i < 4; i++) lines.push(row());
+				if (!initial && draftStage === "title") {
+					lines.push(row(theme.fg("mdHeading", theme.bold("prompt title"))));
+					for (const line of titleInput.render(Math.max(10, safeWidth - 6))) lines.push(row(line));
+					for (let i = 0; i < 3; i++) lines.push(row());
+				} else {
+					const renderedEditor = editor.render(Math.max(10, safeWidth - 6));
+					const contentLines = renderedEditor.length > 2 ? renderedEditor.slice(1, -1) : renderedEditor;
+					for (const line of contentLines) lines.push(row(line));
+					for (let i = contentLines.length; i < 4; i++) lines.push(row());
+				}
 				const modeLine = initial
 					? `${theme.fg("mdHeading", theme.bold(modeMessage[submitMode]))} ${theme.fg("dim", "(shift+tab)")}`
-					: theme.fg("mdHeading", theme.bold(modeMessage.create));
+					: theme.fg("mdHeading", theme.bold(draftStage === "title" ? "enter a title" : modeMessage.create));
 				const innerWidth = Math.max(0, safeWidth - 6);
-				const commandText = "esc: cancel • shift+enter: newline • enter: continue";
+				const commandText = draftStage === "title"
+					? "esc: cancel • enter: continue"
+					: "esc: cancel • shift+enter: newline • enter: continue";
 				const commandWidth = Math.max(0, innerWidth - visibleWidth(modeLine) - 2);
 				const commandLine = theme.fg("muted", truncateToWidth(commandText, commandWidth, "…"));
 				const footerGap = " ".repeat(Math.max(1, innerWidth - visibleWidth(commandLine) - visibleWidth(modeLine)));

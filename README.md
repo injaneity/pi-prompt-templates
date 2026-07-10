@@ -64,7 +64,13 @@ Popup controls:
 
 Type `$`, move to **create prompt template**, and press Tab.
 
-This opens a blank unsaved draft with **create new prompt** as its only action—there are no temporary or update modes for a template that does not exist yet. Write the prompt and press Enter. Pi asks for a name and short description and saves the Markdown file for you.
+This opens a two-step draft with **create new prompt** as its only action:
+
+1. Enter the template title and press Enter.
+2. Enter the template content, using Shift+Enter for newlines.
+3. Press Enter again to create the Markdown file and insert its new `$template-name` reference back into your original chat prompt.
+
+There are no temporary or update modes for a template that does not exist yet.
 
 ## Deleting a template
 
