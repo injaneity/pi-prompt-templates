@@ -19,8 +19,9 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
 	expandBlockReferences,
@@ -31,6 +32,12 @@ import {
 	type BlockScope,
 	type PromptBlock,
 } from "../src/core.js";
+import {
+	contentAfterExternalEditor,
+	resolveExternalEditorCommand,
+	splitExternalEditorCommand,
+} from "../src/external-editor.js";
+import { persistPromptBlock } from "../src/template-storage.js";
 
 const CREATE_TEMPLATE_SENTINEL = "__pi_create_prompt_template__";
 const DELETE_TEMPLATE_SENTINEL = "__pi_delete_prompt_template__";
@@ -111,6 +118,26 @@ function saveBlock(block: PromptBlock, description: string, content: string): Pr
 	return parseBlockFile(readFileSync(path, "utf8"), path, block.scope === "project" ? "project" : "global")!;
 }
 
+function readExternalEditorSetting(path: string): string | undefined {
+	try {
+		const settings: unknown = JSON.parse(readFileSync(path, "utf8"));
+		if (typeof settings === "object" && settings !== null && "externalEditor" in settings) {
+			const command = (settings as { externalEditor?: unknown }).externalEditor;
+			return typeof command === "string" ? command : undefined;
+		}
+	} catch {}
+	return undefined;
+}
+
+function externalEditorCommand(ctx: ExtensionContext): string {
+	let configured = readExternalEditorSetting(join(agentDir(), "settings.json"));
+	if (ctx.isProjectTrusted()) {
+		const projectConfigured = readExternalEditorSetting(join(ctx.cwd, CONFIG_DIR_NAME, "settings.json"));
+		if (projectConfigured !== undefined) configured = projectConfigured;
+	}
+	return resolveExternalEditorCommand(configured);
+}
+
 function panelLine(_theme: Theme, text: string, width: number): string {
 	const clipped = truncateToWidth(text, width, "");
 	return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
@@ -177,7 +204,7 @@ function framedBorder(theme: Theme, width: number, left: "╭" | "├" | "╰", 
 }
 
 type PromptEditorResult =
-	| { action: "apply"; content: string }
+	| { action: "apply"; content: string; template?: PromptBlock }
 	| { action: "saved"; content: string; template: PromptBlock; savedAsNew: boolean };
 
 function slugifyName(value: string): string {
@@ -212,9 +239,13 @@ async function saveAsNewTemplate(ctx: ExtensionContext, content: string, suggest
 	return saveBlock(draft, draft.description, content);
 }
 
-async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | null): Promise<PromptEditorResult | null> {
+async function editPromptTemplate(
+	ctx: ExtensionContext,
+	initial: PromptBlock | null,
+	onOrganized?: (previous: PromptBlock, current: PromptBlock) => void,
+): Promise<PromptEditorResult | null> {
 	if (ctx.mode !== "tui") return null;
-	return await ctx.ui.custom<PromptEditorResult | null>((tui, theme, _keybindings, done) => {
+	return await ctx.ui.custom<PromptEditorResult | null>((tui, theme, keybindings, done) => {
 		const editorTheme: EditorTheme = {
 			borderColor: (text) => theme.fg("accent", text),
 			selectList: {
@@ -229,16 +260,84 @@ async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | 
 		editor.setText(initial?.content ?? "");
 		editor.disableSubmit = true;
 		const titleInput = new Input();
-		let draftStage: "title" | "content" = initial ? "content" : "title";
+		let currentTemplate = initial;
+		let draftStage: "title" | "content" | "organize" | "rename" = initial ? "content" : "title";
 		let draftName = "";
 		let focused = true;
 		let saving = false;
-		type SubmitMode = "temporary" | "save" | "create";
-		const submitModes: readonly SubmitMode[] = initial ? ["temporary", "save", "create"] : ["create"];
+		let externalEditing = false;
+		type SubmitMode = "temporary" | "save" | "create" | "organize";
+		const submitModes: readonly SubmitMode[] = initial ? ["temporary", "save", "create", "organize"] : ["create"];
 		let submitMode: SubmitMode = initial ? "temporary" : "create";
+		let organizeList = new SelectList([], 4, editorTheme.selectList);
 
 		const content = () => editor.getExpandedText().trim();
-		const apply = () => done({ action: "apply", content: content() });
+		const apply = () => done({ action: "apply", content: content(), template: currentTemplate ?? undefined });
+		const returnToContent = () => {
+			draftStage = "content";
+			titleInput.focused = false;
+			editor.focused = focused;
+			tui.requestRender();
+		};
+		const organizationItems = (): SelectItem[] => {
+			if (!currentTemplate) return [];
+			const projectUnavailable = !ctx.isProjectTrusted();
+			const copy = currentTemplate.scope === "bundled";
+			return [
+				{ value: "rename", label: "rename template", description: `Current name: ${currentTemplate.name}` },
+				...(currentTemplate.scope === "global" ? [] : [{ value: "move-global", label: copy ? "copy to global" : "move to global", description: displayPath(globalPromptDir()) }]),
+				...(currentTemplate.scope === "project" ? [] : [{
+					value: "move-project",
+					label: copy ? "copy to project" : "move to project",
+					description: projectUnavailable ? "Project is not trusted" : displayPath(projectPromptDir(ctx.cwd)),
+				}]),
+			];
+		};
+		const openOrganization = () => {
+			organizeList = new SelectList(organizationItems(), 4, editorTheme.selectList);
+			draftStage = "organize";
+			editor.focused = false;
+			titleInput.focused = false;
+			tui.requestRender();
+		};
+		const persistOrganization = (name: string, scope: "global" | "project") => {
+			if (!currentTemplate) return;
+			const body = content();
+			if (!body) {
+				ctx.ui.notify("Cannot save an empty prompt template.", "warning");
+				return;
+			}
+			try {
+				const previous = currentTemplate;
+				const existing = loadBlocks(ctx).find((template) => template.name === name && template.path !== previous.path);
+				if (existing) throw new Error(`Prompt template already exists: ${name}`);
+				const saved = persistPromptBlock(previous, previous.description, body, name, scope, {
+					global: globalPromptDir(),
+					project: projectPromptDir(ctx.cwd),
+					projectTrusted: ctx.isProjectTrusted(),
+				});
+				currentTemplate = saved;
+				editor.setText(saved.content);
+				onOrganized?.(previous, saved);
+				ctx.ui.notify(
+					previous.name === saved.name
+						? `${previous.scope === "bundled" ? "Copied" : "Moved"} prompt template to ${saved.scope}: ${saved.name}`
+						: `Renamed prompt template: ${previous.name} → ${saved.name}`,
+					"info",
+				);
+				returnToContent();
+			} catch (error) {
+				ctx.ui.notify(`Could not organize ${currentTemplate.name}: ${error instanceof Error ? error.message : String(error)}`, "error");
+			}
+		};
+		const acceptRename = () => {
+			const name = slugifyName(titleInput.getValue());
+			if (!isValidBlockName(name)) {
+				ctx.ui.notify("Names must start with a letter and use lowercase letters, numbers, - or _.", "warning");
+				return;
+			}
+			persistOrganization(name, currentTemplate?.scope === "project" ? "project" : "global");
+		};
 		const acceptTitle = () => {
 			const name = slugifyName(titleInput.getValue());
 			if (!isValidBlockName(name)) {
@@ -276,7 +375,7 @@ async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | 
 			}
 		};
 		const saveExisting = () => {
-			if (!initial) {
+			if (!currentTemplate) {
 				ctx.ui.notify("This prompt is unsaved. Use Shift+Tab to select Create new.", "warning");
 				return;
 			}
@@ -285,10 +384,11 @@ async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | 
 				return;
 			}
 			try {
-				const saved = saveBlock(initial, initial.description, content());
+				const saved = saveBlock(currentTemplate, currentTemplate.description, content());
+				currentTemplate = saved;
 				done({ action: "saved", content: saved.content, template: saved, savedAsNew: false });
 			} catch (error) {
-				ctx.ui.notify(`Could not save ${initial.name}: ${error instanceof Error ? error.message : String(error)}`, "error");
+				ctx.ui.notify(`Could not save ${currentTemplate.name}: ${error instanceof Error ? error.message : String(error)}`, "error");
 			}
 		};
 		const saveAsNew = () => {
@@ -303,21 +403,96 @@ async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | 
 				})
 				.finally(() => { saving = false; tui.requestRender(); });
 		};
+		const openExternalEditor = async () => {
+			if (externalEditing) return;
+			externalEditing = true;
+			const original = content();
+			let directory: string | undefined;
+			let stopped = false;
+			let failure: string | undefined;
+			try {
+				directory = mkdtempSync(join(tmpdir(), "pi-prompt-template-"));
+				const path = join(directory, "template.md");
+				writeFileSync(path, original, { encoding: "utf8", mode: 0o600 });
+				const command = externalEditorCommand(ctx);
+				const { editor: executable, args } = splitExternalEditorCommand(command);
+				if (!executable) throw new Error("No external editor configured.");
+				tui.stop();
+				stopped = true;
+				process.stdout.write(`Launching external editor: ${command}\nPi will resume when the editor exits.\n`);
+				const status = await new Promise<number | null>((resolve) => {
+					const child = spawn(executable, [...args, path], { stdio: "inherit", shell: process.platform === "win32" });
+					child.once("error", () => resolve(null));
+					child.once("close", (code) => resolve(code));
+				});
+				if (status !== 0) {
+					failure = status === null ? `Could not launch ${command}.` : `${command} exited with status ${status}.`;
+				} else {
+					const edited = readFileSync(path, "utf8");
+					editor.setText(contentAfterExternalEditor(original, status, edited));
+				}
+			} catch (error) {
+				failure = error instanceof Error ? error.message : String(error);
+			} finally {
+				try {
+					if (directory) rmSync(directory, { recursive: true, force: true });
+				} catch {}
+				if (stopped) tui.start();
+				externalEditing = false;
+				tui.requestRender(true);
+				if (failure) ctx.ui.notify(`External editor failed: ${failure}`, "error");
+			}
+		};
 
 		return {
 			get focused() { return focused; },
 			set focused(value: boolean) {
 				focused = value;
-				titleInput.focused = value && draftStage === "title";
+				titleInput.focused = value && (draftStage === "title" || draftStage === "rename");
 				editor.focused = value && draftStage === "content";
 			},
 			handleInput(data: string) {
-				if (saving) return;
+				if (saving || externalEditing) return;
+				if (draftStage === "organize") {
+					if (matchesKey(data, Key.escape)) return returnToContent();
+					if (matchesKey(data, Key.enter)) {
+						switch (organizeList.getSelectedItem()?.value) {
+							case "rename":
+								titleInput.setValue(currentTemplate?.name ?? "");
+								draftStage = "rename";
+								titleInput.focused = focused;
+								tui.requestRender();
+								return;
+							case "move-global":
+								return persistOrganization(currentTemplate?.name ?? "", "global");
+							case "move-project":
+								if (!ctx.isProjectTrusted()) {
+									ctx.ui.notify("Project prompt templates require a trusted repository.", "warning");
+									return;
+								}
+								return persistOrganization(currentTemplate?.name ?? "", "project");
+						}
+					}
+					organizeList.handleInput(data);
+					tui.requestRender();
+					return;
+				}
+				if (draftStage === "rename") {
+					if (matchesKey(data, Key.escape)) return returnToContent();
+					if (matchesKey(data, Key.enter)) return acceptRename();
+					titleInput.handleInput(data);
+					tui.requestRender();
+					return;
+				}
 				if (matchesKey(data, Key.escape)) return done(null);
-				if (!initial && draftStage === "title") {
+				if (!currentTemplate && draftStage === "title") {
 					if (matchesKey(data, Key.enter)) acceptTitle();
 					else titleInput.handleInput(data);
 					tui.requestRender();
+					return;
+				}
+				if (draftStage === "content" && keybindings.matches(data, "app.editor.external")) {
+					void openExternalEditor();
 					return;
 				}
 				if (matchesKey(data, Key.shift("tab"))) {
@@ -332,9 +507,10 @@ async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | 
 					return;
 				}
 				if (matchesKey(data, Key.enter)) {
-					if (!initial) return createDraft();
+					if (!currentTemplate) return createDraft();
 					if (submitMode === "save") return saveExisting();
 					if (submitMode === "create") return saveAsNew();
+					if (submitMode === "organize") return openOrganization();
 					return apply();
 				}
 				editor.handleInput(data);
@@ -351,13 +527,14 @@ async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | 
 					return panelLine(theme, `${theme.fg("border", "│")}  ${clipped}${padding}  ${theme.fg("border", "│")}`, safeWidth);
 				};
 				let title: string;
-				if (!initial && draftStage === "title") {
+				if (draftStage === "title" || draftStage === "rename") {
 					const renderedTitleInput = titleInput.render(Math.max(4, safeWidth - 23))[0] ?? "> ";
 					const inlineInput = renderedTitleInput.startsWith("> ") ? renderedTitleInput.slice(2) : renderedTitleInput;
-					title = `${theme.fg("border", theme.bold("Prompt Template:"))} ${inlineInput}`;
+					const label = draftStage === "rename" ? "Rename Prompt:" : "Prompt Template:";
+					title = `${theme.fg("border", theme.bold(label))} ${inlineInput}`;
 				} else {
-					const titlePath = initial
-						? displayPath(writablePath(initial))
+					const titlePath = currentTemplate
+						? displayPath(writablePath(currentTemplate))
 						: displayPath(join(globalPromptDir(), `${draftName}.md`));
 					const visibleTitlePath = truncateToWidth(titlePath, Math.max(8, safeWidth - 24), "…");
 					title = `${theme.fg("border", theme.bold("Prompt Template:"))} ${theme.fg("muted", visibleTitlePath)}`;
@@ -367,26 +544,35 @@ async function editPromptTemplate(ctx: ExtensionContext, initial: PromptBlock | 
 					temporary: "modify prompt for this turn only",
 					save: "modify prompt for all future turns",
 					create: "create new prompt",
+					organize: "rename or move template",
 				};
 
 				lines.push(panelLine(theme, framedBorder(theme, safeWidth, "╭", "╮", title), safeWidth));
 				lines.push(row());
 
-				if (!initial && draftStage === "title") {
+				if (draftStage === "title" || draftStage === "rename") {
 					for (let i = 0; i < 4; i++) lines.push(row());
+				} else if (draftStage === "organize") {
+					const menuLines = organizeList.render(Math.max(10, safeWidth - 6));
+					for (const line of menuLines) lines.push(row(line));
+					for (let i = menuLines.length; i < 4; i++) lines.push(row());
 				} else {
 					const renderedEditor = editor.render(Math.max(10, safeWidth - 6));
 					const contentLines = renderedEditor.length > 2 ? renderedEditor.slice(1, -1) : renderedEditor;
 					for (const line of contentLines) lines.push(row(line));
 					for (let i = contentLines.length; i < 4; i++) lines.push(row());
 				}
-				const modeLine = initial
+				const modeLine = currentTemplate
 					? `${theme.fg("mdHeading", theme.bold(modeMessage[submitMode]))} ${theme.fg("dim", "(shift+tab)")}`
 					: theme.fg("mdHeading", theme.bold(draftStage === "title" ? "enter a title" : modeMessage.create));
 				const innerWidth = Math.max(0, safeWidth - 6);
 				const commandText = draftStage === "title"
 					? "esc: cancel • enter: continue"
-					: "esc: cancel • shift+enter: newline • enter: continue";
+					: draftStage === "rename"
+						? "esc: back • enter: rename"
+						: draftStage === "organize"
+							? "esc: back • ↑↓: navigate • enter: continue"
+							: "esc: cancel • ctrl+g: editor • shift+enter: newline • enter: continue";
 				const commandWidth = Math.max(0, innerWidth - visibleWidth(modeLine) - 2);
 				const commandLine = theme.fg("muted", truncateToWidth(commandText, commandWidth, "…"));
 				const footerGap = " ".repeat(Math.max(1, innerWidth - visibleWidth(commandLine) - visibleWidth(modeLine)));
@@ -466,7 +652,10 @@ export default function promptTemplates(pi: ExtensionAPI): void {
 	const appliedDrafts = new Map<string, string>();
 	let deletePickerActive = false;
 	const rememberResult = (template: PromptBlock, result: PromptEditorResult | null) => {
-		if (result) appliedDrafts.set(template.name, result.content);
+		if (!result) return;
+		const current = result.action === "apply" ? result.template ?? template : result.savedAsNew ? template : result.template;
+		appliedDrafts.delete(template.name);
+		appliedDrafts.set(current.name, result.content);
 	};
 
 	pi.registerCommand("prompt-templates", {
@@ -586,9 +775,26 @@ export default function promptTemplates(pi: ExtensionAPI): void {
 					if (template) {
 						this.opening = true;
 						const working = { ...template, content: appliedDrafts.get(template.name) ?? template.content };
-						void editPromptTemplate(ctx, working)
+						let activeTemplate = template;
+						const replaceReference = (previous: PromptBlock, current: PromptBlock) => {
+							activeTemplate = current;
+							appliedDrafts.delete(previous.name);
+							appliedDrafts.set(current.name, current.content);
+							if (previous.name === current.name) return;
+							const cursor = this.getCursor();
+							const currentReference = referenceAtCursor(
+								this.getLines()[cursor.line] ?? "",
+								cursor.col,
+								new Set([previous.name]),
+							);
+							if (!currentReference) return;
+							for (let i = currentReference.start; i < cursor.col; i++) super.handleInput("\x7f");
+							for (let i = cursor.col; i < currentReference.end; i++) super.handleInput("\x1b[3~");
+							this.insertTextAtCursor(`$${current.name}`);
+						};
+						void editPromptTemplate(ctx, working, replaceReference)
 							.then((result) => {
-								rememberResult(template, result);
+								rememberResult(activeTemplate, result);
 								if (result?.action === "saved" && result.savedAsNew) {
 									ctx.ui.notify(`Saved new prompt template: ${result.template.name}`, "info");
 								}

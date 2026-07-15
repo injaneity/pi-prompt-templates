@@ -53,12 +53,25 @@ Move the cursor onto `$coding-guide` and press Tab. A popup opens with the templ
 - **modify prompt for this turn only** — use the edit once without changing the file
 - **modify prompt for all future turns** — update the saved template
 - **create new prompt** — save the edit under a new name
+- **rename or move template** — organize the saved template
 
 Popup controls:
 
 - **Esc** — cancel
+- **Ctrl+G** — edit the template content in your external editor, then return to the popup
 - **Shift+Enter** — add a newline
 - **Enter** — continue with the selected action
+
+Ctrl+G uses Pi's configured `externalEditor`, then `$VISUAL`, `$EDITOR`, and finally the platform fallback. This works with Vim, Neovim, Emacs, and any editor that waits until the file is closed.
+
+## Renaming and moving templates
+
+Open an existing template and use **Shift+Tab** to select **rename or move template**. Press Enter to choose an action.
+
+- rename fails if the destination name already exists
+- move preserves the content currently shown in the popup
+- project destinations require a trusted repository
+- bundled examples are copied into global or project scope; the installed example remains unchanged
 
 ## Creating a template
 
