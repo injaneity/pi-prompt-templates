@@ -58,11 +58,11 @@ Move the cursor onto `$coding-guide` and press Tab. A popup opens with the templ
 Popup controls:
 
 - **Esc** — cancel
-- **Ctrl+G** — edit the template content in your external editor, then return to the popup
+- **Your `app.editor.external` keybinding** (Ctrl+G by default) — edit the template content in your external editor, then return to the popup
 - **Shift+Enter** — add a newline
 - **Enter** — continue with the selected action
 
-Ctrl+G uses Pi's configured `externalEditor`, then `$VISUAL`, `$EDITOR`, and finally the platform fallback. This works with Vim, Neovim, Emacs, and any editor that waits until the file is closed.
+The popup uses Pi's configured `externalEditor`, then `$VISUAL`, `$EDITOR`, and finally the platform fallback. Configure its shortcut with Pi's `app.editor.external` keybinding. This works with Vim, Neovim, Emacs, and any editor that waits until the file is closed.
 
 ## Renaming and moving templates
 

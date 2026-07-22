@@ -2,6 +2,9 @@ import {
 	CONFIG_DIR_NAME,
 	CustomEditor,
 	DynamicBorder,
+	getAgentDir,
+	keyText,
+	SettingsManager,
 	type ExtensionAPI,
 	type ExtensionContext,
 	type Theme,
@@ -34,7 +37,6 @@ import {
 } from "../src/core.js";
 import {
 	contentAfterExternalEditor,
-	resolveExternalEditorCommand,
 	splitExternalEditorCommand,
 } from "../src/external-editor.js";
 import { persistPromptBlock } from "../src/template-storage.js";
@@ -44,7 +46,7 @@ const DELETE_TEMPLATE_SENTINEL = "__pi_delete_prompt_template__";
 const DELETE_SELECTION_PREFIX = "__pi_delete_prompt_template_selection__:";
 
 function agentDir(): string {
-	return process.env.PI_AGENT_DIR || join(homedir(), ".pi", "agent");
+	return getAgentDir();
 }
 
 function globalPromptDir(): string {
@@ -118,24 +120,8 @@ function saveBlock(block: PromptBlock, description: string, content: string): Pr
 	return parseBlockFile(readFileSync(path, "utf8"), path, block.scope === "project" ? "project" : "global")!;
 }
 
-function readExternalEditorSetting(path: string): string | undefined {
-	try {
-		const settings: unknown = JSON.parse(readFileSync(path, "utf8"));
-		if (typeof settings === "object" && settings !== null && "externalEditor" in settings) {
-			const command = (settings as { externalEditor?: unknown }).externalEditor;
-			return typeof command === "string" ? command : undefined;
-		}
-	} catch {}
-	return undefined;
-}
-
-function externalEditorCommand(ctx: ExtensionContext): string {
-	let configured = readExternalEditorSetting(join(agentDir(), "settings.json"));
-	if (ctx.isProjectTrusted()) {
-		const projectConfigured = readExternalEditorSetting(join(ctx.cwd, CONFIG_DIR_NAME, "settings.json"));
-		if (projectConfigured !== undefined) configured = projectConfigured;
-	}
-	return resolveExternalEditorCommand(configured);
+function externalEditorCommand(ctx: ExtensionContext): string | undefined {
+	return SettingsManager.create(ctx.cwd, agentDir(), { projectTrusted: ctx.isProjectTrusted() }).getExternalEditorCommand();
 }
 
 function panelLine(_theme: Theme, text: string, width: number): string {
@@ -415,6 +401,7 @@ async function editPromptTemplate(
 				const path = join(directory, "template.md");
 				writeFileSync(path, original, { encoding: "utf8", mode: 0o600 });
 				const command = externalEditorCommand(ctx);
+				if (!command) throw new Error("No external editor configured.");
 				const { editor: executable, args } = splitExternalEditorCommand(command);
 				if (!executable) throw new Error("No external editor configured.");
 				tui.stop();
@@ -572,7 +559,7 @@ async function editPromptTemplate(
 						? "esc: back • enter: rename"
 						: draftStage === "organize"
 							? "esc: back • ↑↓: navigate • enter: continue"
-							: "esc: cancel • ctrl+g: editor • shift+enter: newline • enter: continue";
+							: `esc: cancel • ${keyText("app.editor.external")}: editor • shift+enter: newline • enter: continue`;
 				const commandWidth = Math.max(0, innerWidth - visibleWidth(modeLine) - 2);
 				const commandLine = theme.fg("muted", truncateToWidth(commandText, commandWidth, "…"));
 				const footerGap = " ".repeat(Math.max(1, innerWidth - visibleWidth(commandLine) - visibleWidth(modeLine)));

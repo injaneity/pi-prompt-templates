@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { expandBlockReferences, parseBlockFile, referenceAtCursor, referencesInLine } from "../src/core.js";
-import { contentAfterExternalEditor, resolveExternalEditorCommand, splitExternalEditorCommand } from "../src/external-editor.js";
+import { contentAfterExternalEditor, splitExternalEditorCommand } from "../src/external-editor.js";
 import { persistPromptBlock } from "../src/template-storage.js";
 
 const block = parseBlockFile("---\ndescription: Coding guide\n---\nRead the repo first.\n", "/tmp/coding-guide.md", "global")!;
@@ -36,10 +36,7 @@ test("leaves unknown and escaped references alone", () => {
 	assert.equal(expandBlockReferences("$unknown \\$coding-guide", [block]), "$unknown \\$coding-guide");
 });
 
-test("uses Pi external-editor precedence and preserves content on failed exit", () => {
-	assert.equal(resolveExternalEditorCommand("nvim -f", "vim", "emacs", "other"), "nvim -f");
-	assert.equal(resolveExternalEditorCommand(undefined, "vim", "emacs", "other"), "vim");
-	assert.equal(resolveExternalEditorCommand(undefined, "", "", "win32"), "notepad");
+test("splits an external-editor command and preserves content on failed exit", () => {
 	assert.deepEqual(splitExternalEditorCommand("nvim -f"), { editor: "nvim", args: ["-f"] });
 	assert.equal(contentAfterExternalEditor("draft", 1, "edited"), "draft");
 	assert.equal(contentAfterExternalEditor("draft", 0, "edited\n"), "edited");
